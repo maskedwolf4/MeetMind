@@ -1,0 +1,34 @@
+# FastAPI + ASGI
+fastapi==0.115.12
+uvicorn[standard]==0.34.3
+
+# Database
+sqlalchemy[asyncio]==2.0.41
+asyncpg==0.30.0
+alembic==1.15.2
+
+# Auth
+python-jose[cryptography]==3.4.0
+passlib[bcrypt]==1.7.4
+bcrypt==4.3.0
+
+# Validation / Settings
+pydantic==2.11.3
+pydantic-settings==2.9.1
+python-dotenv==1.1.0
+email-validator==2.2.0
+
+# LLM — Groq for AI-powered meeting summaries
+groq==0.25.0
+
+# Microsoft Graph + Bot Framework
+botbuilder-core==4.16.2
+botbuilder-schema==4.16.2
+botframework-connector==4.16.2
+msgraph-sdk==1.26.0
+azure-identity==1.23.0
+msal==1.32.0
+
+# HTTP
+httpx==0.28.1
+python-multipart==0.0.20

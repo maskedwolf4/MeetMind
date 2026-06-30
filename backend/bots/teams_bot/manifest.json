@@ -1,0 +1,48 @@
+{
+  "$schema": "https://developer.microsoft.com/en-us/json-schemas/teams/v1.16/MicrosoftTeams.schema.json",
+  "manifestVersion": "1.16",
+  "version": "1.0.0",
+  "id": "{{AZURE_APP_ID}}",
+  "developer": {
+    "name": "MeetMind",
+    "websiteUrl": "https://meetmind.app",
+    "privacyUrl": "https://meetmind.app/privacy",
+    "termsOfUseUrl": "https://meetmind.app/terms"
+  },
+  "name": {
+    "short": "MeetMind Bot",
+    "full": "MeetMind AI Meeting Assistant Bot"
+  },
+  "description": {
+    "short": "AI-powered meeting transcription and chat assistant",
+    "full": "MeetMind Bot joins your Teams meetings, captures the transcript, and provides personalized AI-powered meeting summaries and chat for each attendee."
+  },
+  "icons": {
+    "outline": "icon-outline.png",
+    "color": "icon-color.png"
+  },
+  "accentColor": "#6366F1",
+  "bots": [
+    {
+      "botId": "{{AZURE_APP_ID}}",
+      "scopes": ["team", "personal", "groupChat"],
+      "supportsFiles": false,
+      "isNotificationOnly": false,
+      "supportsCalling": true,
+      "supportsVideo": false
+    }
+  ],
+  "permissions": [
+    "identity",
+    "messageTeamMembers"
+  ],
+  "validDomains": [
+    "*.azurewebsites.net",
+    "*.ngrok.io",
+    "*.ngrok-free.app"
+  ],
+  "webApplicationInfo": {
+    "id": "{{AZURE_APP_ID}}",
+    "resource": "https://graph.microsoft.com"
+  }
+}

@@ -1,33 +1,58 @@
 # MeetMind
 
-# Phase 1
-Build two things for "MeetMind" — an AI meeting assistant that summarizes
-meeting transcripts and lets each attendee chat with a personalized, isolated
-view of that meeting (no leakage of one attendee's action items to another):
+AI-powered meeting assistant that summarizes meeting transcripts and lets each
+attendee chat with a personalized, isolated view of that meeting — no leakage of
+one attendee's action items to another.
 
-PART A — the foundation: Supabase Postgres schema, FastAPI backend scaffold
-with JWT auth, Next.js frontend scaffold with auth pages.
+## Phase 1 — Foundation + Meeting Acquisition (Current)
 
-PART B — the meeting-acquisition framework: a Microsoft Teams bot that can
-join a live Teams meeting via Microsoft Graph / Bot Framework and produce a
-transcript, plus a Google Meet ingestion path based on transcript export
-(not live bot-join, which is explicitly out of scope for the primary path —
-see RULES for the optional stretch addition).
+- **Supabase Postgres schema** — 5 tables (users, meetings, meeting_attendees, chat_threads, chat_messages)
+- **FastAPI backend** — JWT auth, meeting CRUD, Teams bot join, Meet import
+- **Next.js frontend** — Login, Register, Dashboard with meeting connection UI
+- **Microsoft Teams bot** — Joins live meetings via Graph API, captures transcripts
+- **Google Meet import** — Export-based transcript ingestion (not live)
 
-# Phase 2
-Build the memory and ingestion layer of "MeetMind" on top of the Day 1
-foundation (Supabase Postgres schema + FastAPI auth already exist and must
-not be broken or redesigned). This phase adds: Cognee memory layer
-integration with verified per-user isolation, meeting CRUD endpoints, a
-LangGraph ingestion pipeline that turns a raw transcript into a shared
-meeting summary plus per-attendee personalized extracts, and Groq as the LLM
-provider for all extraction steps. Do NOT build the chat endpoint, streaming,
-or any frontend chat UI in this phase — that is Day 3.
+## Phase 2 — Memory & Ingestion (Day 2)
 
-# Phase 3
-Complete "MeetMind" by building the chat layer on top of Day 1 (auth +
-schema) and Day 2 (Cognee isolation + ingestion pipeline) — both already
-exist and must not be redesigned or broken. This phase adds: the
-streaming chat endpoint, conversation history persistence in Postgres, the
-full Next.js dashboard and chat UI, and final demo-readiness polish
-including a seeded demo dataset.
+- Cognee memory layer with per-user isolation
+- LangGraph ingestion pipeline
+- Meeting CRUD endpoints
+- Groq LLM provider for extraction
+
+## Phase 3 — Chat Layer (Day 3)
+
+- Streaming chat endpoint
+- Conversation history persistence
+- Full Next.js dashboard and chat UI
+- Demo-readiness polish with seeded dataset
+
+## Quick Start
+
+See [docs/README.md](docs/README.md) for full setup instructions.
+
+### Backend
+```bash
+cd backend
+python -m venv venv && source venv/bin/activate
+pip install -r requirements.txt
+cp .env.example .env  # Edit with your DATABASE_URL
+alembic upgrade head
+uvicorn app.main:app --reload --port 8000
+```
+
+### Frontend
+```bash
+cd frontend
+npm install
+cp .env.local.example .env.local
+npm run dev
+```
+
+## Architecture
+
+See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for full system design.
+
+## Setup Guides
+
+- [Teams Bot Setup](docs/TEAMS_BOT_SETUP.md) — Azure AD app registration
+- [Meet Ingestion](docs/MEET_INGESTION.md) — Google Meet transcript export
