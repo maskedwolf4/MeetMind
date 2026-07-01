@@ -1,19 +1,14 @@
 """
-MeetMind — FastAPI application entry point.
+MeetMind — FastAPI application entry point (v0.4.0).
 
-MeetMind is an AI meeting assistant that:
-  1. Attends live Teams meetings via bot (captures transcript automatically)
+Capabilities:
+  1. Attends live Teams meetings via bot
   2. Accepts exported Google Meet transcripts
-  3. Accepts manually pasted transcripts from any source
-  4. Generates AI-powered summaries from all transcripts
-  5. Runs a LangGraph ingestion pipeline for per-attendee personalized extracts
-  6. Stores everything in Cognee with per-user isolation
-
-On startup:
-  1. Validates Azure AD prerequisites for Teams bot (degraded mode if missing).
-  2. Validates Groq API key for summarization (fallback mode if missing).
-  3. Configures Cognee for memory layer.
-  4. Registers all routers (auth, meetings, bot webhook).
+  3. Accepts manually pasted transcripts
+  4. Generates AI-powered summaries
+  5. Runs LangGraph ingestion pipeline for per-attendee extracts
+  6. Stores meeting memory in Cognee Cloud (or in-memory fallback)
+  7. Streaming chat with per-user isolated meeting context
 """
 
 import logging
@@ -24,8 +19,9 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.core.config import settings
 from app.routers import auth, meetings
+from app.routers.chat import router as chat_router
 from app.services.teams_bot_service import teams_bot_service
-from app.services.cognee_service import configure_cognee
+from app.services.cognee_service import configure_cognee, is_cloud_connected
 from bots.teams_bot.bot_handler import router as bot_router
 
 # ------------------------------------------------------------------ #
@@ -45,15 +41,14 @@ logger = logging.getLogger("meetmind")
 async def lifespan(app: FastAPI):
     """Run startup tasks before the app starts serving requests."""
     logger.info("=" * 60)
-    logger.info("  MeetMind Backend — Starting Up (v0.3.0)")
+    logger.info("  MeetMind Backend — Starting Up (v0.4.0)")
     logger.info("=" * 60)
 
     # Azure prerequisite check
     azure_ok = await teams_bot_service.validate_prerequisites()
     app.state.azure_configured = azure_ok
-
     if azure_ok:
-        logger.info("🤖 Teams live-join: ENABLED — bot can attend meetings")
+        logger.info("🤖 Teams live-join: ENABLED")
     else:
         logger.info("⚠️  Teams live-join: DISABLED (degraded mode)")
 
@@ -65,18 +60,32 @@ async def lifespan(app: FastAPI):
         logger.info("⚠️  AI Summarization: FALLBACK MODE (set GROQ_API_KEY)")
         app.state.groq_configured = False
 
-    # Cognee memory layer
-    configure_cognee()
-    logger.info("🧩 Cognee memory layer: CONFIGURED")
+    # Cognee Cloud connection
+    cognee_ok = await configure_cognee()
+    app.state.cognee_cloud = cognee_ok
+    if not cognee_ok:
+        if not settings.cognee_configured:
+            logger.info("⚠️  Cognee Cloud: NOT CONFIGURED (set COGNEE_API_KEY)")
+        # else: warning already logged in configure_cognee
 
     logger.info("📝 Meet transcript import: ENABLED")
     logger.info("📋 Manual transcript upload: ENABLED")
     logger.info("🔄 LangGraph ingestion pipeline: ENABLED")
+    logger.info("💬 Streaming chat: ENABLED")
     logger.info("=" * 60)
     logger.info("  MeetMind Backend — Ready")
     logger.info("=" * 60)
 
     yield  # App runs here
+
+    # Cleanup: disconnect from Cognee Cloud if connected
+    if is_cloud_connected():
+        try:
+            import cognee
+            await cognee.disconnect()
+            logger.info("Cognee Cloud disconnected")
+        except Exception:
+            pass
 
     logger.info("MeetMind Backend — Shutting down")
 
@@ -87,10 +96,10 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="MeetMind API",
     description=(
-        "AI Meeting Assistant — attends your meetings, captures transcripts, "
-        "generates personalized summaries per attendee with per-user isolation."
+        "AI Meeting Assistant — attends meetings, captures transcripts, "
+        "generates personalized summaries, and provides per-user isolated chat."
     ),
-    version="0.3.0",
+    version="0.4.0",
     lifespan=lifespan,
 )
 
@@ -106,6 +115,7 @@ app.add_middleware(
 # Routers
 app.include_router(auth.router)
 app.include_router(meetings.router)
+app.include_router(chat_router)
 app.include_router(bot_router)
 
 
@@ -113,9 +123,10 @@ app.include_router(bot_router)
 async def health():
     return {
         "status": "ok",
-        "version": "0.3.0",
+        "version": "0.4.0",
         "azure_configured": getattr(app.state, "azure_configured", False),
         "groq_configured": getattr(app.state, "groq_configured", False),
+        "cognee_cloud": getattr(app.state, "cognee_cloud", False),
         "capabilities": {
             "teams_live_join": getattr(app.state, "azure_configured", False),
             "ai_summarization": getattr(app.state, "groq_configured", False),
@@ -123,5 +134,6 @@ async def health():
             "manual_transcript": True,
             "ingestion_pipeline": True,
             "cognee_memory": True,
+            "streaming_chat": True,
         },
     }

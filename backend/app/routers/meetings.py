@@ -117,11 +117,12 @@ async def create_meeting(
     current_user: User = Depends(get_current_user),
 ):
     """Create a new draft meeting. The creator is automatically an attendee."""
+    meeting_source = body.source or "manual"
     meeting = Meeting(
         title=body.title,
         meeting_datetime=body.meeting_datetime,
         created_by=current_user.id,
-        source="manual",
+        source=meeting_source,
         status="draft",
     )
     db.add(meeting)
@@ -131,6 +132,25 @@ async def create_meeting(
     attendee = MeetingAttendee(meeting_id=meeting.id, user_id=current_user.id)
     db.add(attendee)
     await db.flush()
+
+    # Optionally add other attendees
+    if body.attendee_emails:
+        for email in body.attendee_emails:
+            # Skip if it is the creator
+            if email.lower() == current_user.email.lower():
+                continue
+            # Search for user by email
+            user_result = await db.execute(select(User).where(User.email == email))
+            user = user_result.scalar_one_or_none()
+            if user:
+                # Add as attendee
+                db.add(MeetingAttendee(meeting_id=meeting.id, user_id=user.id))
+            else:
+                import logging
+                logging.getLogger("meetmind.meetings").warning(
+                    "Attendee email not registered: %s — skipping", email
+                )
+        await db.flush()
 
     await db.refresh(meeting)
     return MeetingResponse.model_validate(meeting)

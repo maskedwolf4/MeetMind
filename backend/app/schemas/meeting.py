@@ -12,6 +12,8 @@ from pydantic import BaseModel, Field, EmailStr
 class MeetingCreateRequest(BaseModel):
     title: str = Field(..., min_length=1, max_length=255)
     meeting_datetime: datetime
+    source: Optional[str] = "manual"
+    attendee_emails: Optional[List[EmailStr]] = None
 
 
 class TeamsJoinRequest(BaseModel):

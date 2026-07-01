@@ -1,30 +1,15 @@
 """
 Cognee Service — memory layer with per-user isolation for meeting content.
 
-API DEVIATION FROM TASK SPEC:
-  The real Cognee API (as of the installed version) uses:
-    - cognee.add(data, dataset_name, user=User, node_set=List[str])
-    - cognee.cognify(datasets, user=User)
-    - cognee.search(query_text, user=User, node_name=List[str], datasets)
-  
-  Where `user` is a `cognee.modules.users.models.User` object (not a string UUID),
-  and `node_set`/`node_name` are List[str] (not a single string).
+COGNEE CLOUD MIGRATION (Phase 3):
+  Uses cognee.serve(url, api_key) to connect to Cognee Cloud.
+  The serve() call routes all subsequent add/cognify/search operations
+  through the cloud tenant instead of local storage.
 
-  This service wraps Cognee's API to provide the isolation semantics required by
-  MeetMind: each user gets their own Cognee User scoped by their MeetMind UUID,
-  and each meeting is tagged via node_set=[meeting_id].
+  If COGNEE_API_KEY is not set, falls back to in-memory storage gracefully.
+  The in-memory store is always available as a safety net.
 
-COGNEE LLM CONFIG MODE:
-  Cognee supports custom LLM endpoint config via environment variables:
-    LLM_PROVIDER, LLM_API_KEY, LLM_MODEL
-  We set these to route through Groq BEFORE calling cognee.add/cognify.
-  However, since Cognee's cognify() pipeline does its own entity extraction,
-  we PRE-PROCESS content into clean structured text via our own Groq calls
-  in the ingestion pipeline BEFORE storing in Cognee. This means Cognee is
-  used primarily as storage/retrieval/graph layer, with extraction done by us.
-  MODE: PRE-PROCESSED (our Groq calls produce structured text → Cognee stores it)
-
-Isolation guarantee:
+Isolation guarantee (unchanged):
   - Global summary: stored under EACH attendee's Cognee user with node_set=[meeting_id]
   - Per-person extract: stored under ONLY that attendee's Cognee user with node_set=[meeting_id]
   - Search always scopes by both user AND node_name=[meeting_id]
@@ -38,6 +23,7 @@ logger = logging.getLogger("meetmind.cognee")
 
 # Flag to track if cognee is available
 _cognee_available = False
+_cognee_cloud_connected = False
 try:
     import cognee
     from cognee.api.v1.search import SearchType
@@ -47,35 +33,71 @@ except ImportError:
     SearchType = None
 
 
-# In-memory fallback storage when Cognee is not installed
+# In-memory fallback storage when Cognee is not installed or Cloud is unreachable
 # Structure: { (user_id_str, meeting_id_str): [content_strings] }
 _memory_store: dict[tuple[str, str], list[str]] = {}
 
 
-def configure_cognee():
+async def configure_cognee() -> bool:
     """
-    Configure Cognee to use Groq as its LLM provider via environment variables.
-    Called once on startup.
+    Configure Cognee for cloud or local mode.
+
+    Cloud mode: uses cognee.serve(url, api_key) to connect to Cognee Cloud.
+    Local mode: uses cognee.config.set_llm_* to configure the LLM provider.
+
+    Returns True if Cognee Cloud is connected, False otherwise.
     """
+    global _cognee_cloud_connected
+
     from app.core.config import settings
 
     if not _cognee_available:
         logger.info("Cognee not available — using in-memory fallback storage")
-        return
+        return False
 
+    # Configure LLM provider (Groq) for Cognee's internal extraction
     if settings.groq_configured:
-        # Route Cognee's internal LLM calls through Groq
-        os.environ["LLM_API_KEY"] = settings.GROQ_API_KEY
-        os.environ["LLM_PROVIDER"] = "groq"
-        os.environ["LLM_MODEL"] = settings.GROQ_MODEL
-        logger.info(
-            "Cognee configured to use Groq (%s) for internal extraction",
-            settings.GROQ_MODEL,
-        )
+        try:
+            cognee.config.set_llm_api_key(settings.GROQ_API_KEY)
+            cognee.config.set_llm_provider("groq")
+            cognee.config.set_llm_model(settings.GROQ_MODEL)
+            logger.info(
+                "Cognee LLM configured: Groq (%s)", settings.GROQ_MODEL
+            )
+        except Exception as e:
+            logger.warning("Failed to configure Cognee LLM: %s", str(e))
+            # Fall back to env vars
+            os.environ["LLM_API_KEY"] = settings.GROQ_API_KEY
+            os.environ["LLM_PROVIDER"] = "groq"
+            os.environ["LLM_MODEL"] = settings.GROQ_MODEL
+
+    # Attempt Cognee Cloud connection
+    if settings.cognee_configured:
+        try:
+            await cognee.serve(
+                url=settings.COGNEE_BASE_URL,
+                api_key=settings.COGNEE_API_KEY,
+            )
+            _cognee_cloud_connected = True
+            logger.info("✅ Cognee Cloud connected at %s", settings.COGNEE_BASE_URL)
+            return True
+        except Exception as e:
+            logger.warning(
+                "⚠️ Cognee Cloud unreachable: %s — falling back to local/in-memory mode",
+                str(e),
+            )
+            _cognee_cloud_connected = False
+            return False
     else:
-        logger.warning(
-            "GROQ_API_KEY not set — Cognee will use its default LLM provider"
+        logger.info(
+            "⚠️ COGNEE_API_KEY not set — using in-memory fallback storage"
         )
+        return False
+
+
+def is_cloud_connected() -> bool:
+    """Check if Cognee Cloud is connected."""
+    return _cognee_cloud_connected
 
 
 async def _get_or_create_cognee_user(user_id: str):
@@ -87,9 +109,6 @@ async def _get_or_create_cognee_user(user_id: str):
         return None
 
     from cognee.modules.users.methods import get_default_user
-    # Use the default user for now — Cognee's user isolation is primarily
-    # dataset-scoped. We achieve per-user isolation through dataset naming
-    # (user_id as dataset_name) + node_set tagging.
     try:
         user = await get_default_user()
         return user
@@ -118,7 +137,7 @@ async def add_global_summary(
         dataset_name = f"user_{user_id}"
         node_tags = [meeting_id]
 
-        if _cognee_available:
+        if _cognee_available and (_cognee_cloud_connected or not _memory_only()):
             try:
                 cognee_user = await _get_or_create_cognee_user(user_id)
                 await cognee.add(
@@ -164,7 +183,7 @@ async def add_person_extract(
     dataset_name = f"user_{user_id}"
     node_tags = [meeting_id]
 
-    if _cognee_available:
+    if _cognee_available and (_cognee_cloud_connected or not _memory_only()):
         try:
             cognee_user = await _get_or_create_cognee_user(user_id)
             await cognee.add(
@@ -196,7 +215,7 @@ async def run_cognify() -> None:
     Run Cognee's cognify() to process all newly added data into the knowledge graph.
     Called once after all adds for a meeting are complete.
     """
-    if not _cognee_available:
+    if not _cognee_available or _memory_only():
         logger.info("Cognify skipped — Cognee not available (in-memory mode)")
         return
 
@@ -230,7 +249,7 @@ async def search(
     dataset_name = f"user_{user_id}"
     node_tags = [meeting_id]
 
-    if _cognee_available:
+    if _cognee_available and (_cognee_cloud_connected or not _memory_only()):
         try:
             cognee_user = await _get_or_create_cognee_user(user_id)
             results = await cognee.search(
@@ -272,6 +291,12 @@ async def search(
             return _memory_search(query, user_id, meeting_id)
     else:
         return _memory_search(query, user_id, meeting_id)
+
+
+def _memory_only() -> bool:
+    """Check if we should use memory-only mode (no Cognee backend available)."""
+    from app.core.config import settings
+    return not settings.cognee_configured and not _cognee_cloud_connected
 
 
 def _memory_search(query: str, user_id: str, meeting_id: str) -> List[str]:

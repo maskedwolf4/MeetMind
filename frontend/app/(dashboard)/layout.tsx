@@ -5,7 +5,7 @@ import { useRouter } from 'next/navigation';
 import { useEffect } from 'react';
 
 export default function DashboardLayout({ children }: { children: React.ReactNode }) {
-  const { user, loading, logout } = useAuth();
+  const { user, loading } = useAuth();
   const router = useRouter();
 
   useEffect(() => {
@@ -26,18 +26,5 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
     return null;
   }
 
-  return (
-    <div className="dashboard-page">
-      <nav className="dashboard-nav">
-        <span className="brand">MeetMind</span>
-        <div className="nav-user">
-          <span className="nav-user-name">{user.name}</span>
-          <button className="btn-logout" onClick={logout} id="logout-btn">
-            Sign Out
-          </button>
-        </div>
-      </nav>
-      {children}
-    </div>
-  );
+  return <>{children}</>;
 }

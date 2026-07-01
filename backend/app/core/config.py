@@ -30,6 +30,10 @@ class Settings(BaseSettings):
     GROQ_API_KEY: str = ""
     GROQ_MODEL: str = "llama-3.3-70b-versatile"
 
+    # Cognee Cloud — memory layer
+    COGNEE_API_KEY: str = ""
+    COGNEE_BASE_URL: str = "https://api.cognee.ai"
+
     # CORS
     BACKEND_CORS_ORIGINS: str = '["http://localhost:3000"]'
 
@@ -50,6 +54,11 @@ class Settings(BaseSettings):
     def groq_configured(self) -> bool:
         """Return True if Groq API key is set for summarization."""
         return bool(self.GROQ_API_KEY)
+
+    @property
+    def cognee_configured(self) -> bool:
+        """Return True if Cognee Cloud API key is set."""
+        return bool(self.COGNEE_API_KEY)
 
     model_config = {"env_file": ".env", "env_file_encoding": "utf-8"}
 
