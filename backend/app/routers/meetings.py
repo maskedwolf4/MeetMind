@@ -1,18 +1,25 @@
-"""Meeting router: create, get, Teams join, Meet import, summarize, manual transcript."""
+"""Meeting router: CRUD, Teams join, Meet import, ingestion pipeline, summarization.
+
+Phase 2 additions (extend only, Day 1 endpoints preserved):
+  GET  /meetings              -> list meetings where current user is attendee
+  GET  /meetings/{id}         -> 404 unless current user is attendee
+  POST /meetings/{id}/attendees -> add user as attendee by email
+  POST /meetings/{id}/process -> trigger LangGraph ingestion pipeline
+"""
 
 from datetime import datetime, timezone
 from uuid import UUID
 from typing import List
 
-from fastapi import APIRouter, Depends, HTTPException, status
-from sqlalchemy import select
+from fastapi import APIRouter, Depends, HTTPException, status, BackgroundTasks
+from sqlalchemy import select, or_
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
 from app.core.db import get_db
 from app.core.security import get_current_user
 from app.models.user import User
-from app.models.meeting import Meeting
+from app.models.meeting import Meeting, MeetingAttendee
 from app.schemas.meeting import (
     MeetingCreateRequest,
     MeetingResponse,
@@ -20,6 +27,8 @@ from app.schemas.meeting import (
     TeamsJoinRequest,
     MeetImportRequest,
     ManualTranscriptRequest,
+    AddAttendeeRequest,
+    AddAttendeeResponse,
 )
 from app.services.teams_bot_service import teams_bot_service
 from app.services.meet_ingestion_service import MeetIngestionService
@@ -29,8 +38,34 @@ router = APIRouter(prefix="/meetings", tags=["meetings"])
 
 
 # ------------------------------------------------------------------ #
-# Helper
+# Helpers
 # ------------------------------------------------------------------ #
+async def _get_meeting_for_attendee(
+    meeting_id: UUID, db: AsyncSession, current_user: User
+) -> Meeting:
+    """Fetch a meeting, ensuring the current user is an attendee OR the creator."""
+    result = await db.execute(select(Meeting).where(Meeting.id == meeting_id))
+    meeting = result.scalar_one_or_none()
+    if not meeting:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Meeting not found")
+
+    # Check if user is creator
+    if meeting.created_by == current_user.id:
+        return meeting
+
+    # Check if user is an attendee
+    attendee_check = await db.execute(
+        select(MeetingAttendee).where(
+            MeetingAttendee.meeting_id == meeting_id,
+            MeetingAttendee.user_id == current_user.id,
+        )
+    )
+    if attendee_check.scalar_one_or_none() is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Meeting not found")
+
+    return meeting
+
+
 async def _get_meeting_for_creator(
     meeting_id: UUID, db: AsyncSession, current_user: User
 ) -> Meeting:
@@ -44,8 +79,36 @@ async def _get_meeting_for_creator(
     return meeting
 
 
+async def _get_meeting_attendees(meeting_id: UUID, db: AsyncSession) -> dict[str, str]:
+    """Get all attendees for a meeting as {user_id_str: user_name}."""
+    result = await db.execute(
+        select(User)
+        .join(MeetingAttendee, MeetingAttendee.user_id == User.id)
+        .where(MeetingAttendee.meeting_id == meeting_id)
+    )
+    attendees = result.scalars().all()
+
+    # Also include the creator
+    meeting_result = await db.execute(select(Meeting).where(Meeting.id == meeting_id))
+    meeting = meeting_result.scalar_one_or_none()
+    if meeting:
+        creator_result = await db.execute(select(User).where(User.id == meeting.created_by))
+        creator = creator_result.scalar_one_or_none()
+        if creator:
+            attendee_map = {str(creator.id): creator.name}
+        else:
+            attendee_map = {}
+    else:
+        attendee_map = {}
+
+    for u in attendees:
+        attendee_map[str(u.id)] = u.name
+
+    return attendee_map
+
+
 # ------------------------------------------------------------------ #
-# CRUD
+# CRUD (Phase 2: list by attendee, get by attendee)
 # ------------------------------------------------------------------ #
 @router.post("", response_model=MeetingResponse, status_code=status.HTTP_201_CREATED)
 async def create_meeting(
@@ -53,7 +116,7 @@ async def create_meeting(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    """Create a new draft meeting."""
+    """Create a new draft meeting. The creator is automatically an attendee."""
     meeting = Meeting(
         title=body.title,
         meeting_datetime=body.meeting_datetime,
@@ -63,6 +126,12 @@ async def create_meeting(
     )
     db.add(meeting)
     await db.flush()
+
+    # Auto-add creator as an attendee
+    attendee = MeetingAttendee(meeting_id=meeting.id, user_id=current_user.id)
+    db.add(attendee)
+    await db.flush()
+
     await db.refresh(meeting)
     return MeetingResponse.model_validate(meeting)
 
@@ -72,13 +141,26 @@ async def list_meetings(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    """List all meetings created by the current user."""
+    """
+    List all meetings where the current user is an attendee or creator,
+    ordered by meeting_datetime desc, regardless of source.
+    """
+    # Find meetings where user is either creator or attendee
+    attendee_meeting_ids = select(MeetingAttendee.meeting_id).where(
+        MeetingAttendee.user_id == current_user.id
+    ).scalar_subquery()
+
     result = await db.execute(
         select(Meeting)
-        .where(Meeting.created_by == current_user.id)
-        .order_by(Meeting.created_at.desc())
+        .where(
+            or_(
+                Meeting.created_by == current_user.id,
+                Meeting.id.in_(attendee_meeting_ids),
+            )
+        )
+        .order_by(Meeting.meeting_datetime.desc())
     )
-    meetings = result.scalars().all()
+    meetings = result.scalars().unique().all()
     return [MeetingResponse.model_validate(m) for m in meetings]
 
 
@@ -88,13 +170,68 @@ async def get_meeting(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    """Get a meeting by ID. Only the creator can view it."""
-    meeting = await _get_meeting_for_creator(meeting_id, db, current_user)
+    """Get a meeting by ID. Returns 404 unless current user is an attendee or creator."""
+    meeting = await _get_meeting_for_attendee(meeting_id, db, current_user)
     return MeetingResponse.model_validate(meeting)
 
 
 # ------------------------------------------------------------------ #
-# Teams Live Join — bot attends the meeting
+# Attendee management
+# ------------------------------------------------------------------ #
+@router.post(
+    "/{meeting_id}/attendees",
+    response_model=AddAttendeeResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+async def add_attendee(
+    meeting_id: UUID,
+    body: AddAttendeeRequest,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """
+    Add an existing user as a meeting attendee by email.
+    Returns 404 if the email is not a registered user.
+    Only the meeting creator can add attendees.
+    """
+    meeting = await _get_meeting_for_creator(meeting_id, db, current_user)
+
+    # Find user by email
+    result = await db.execute(select(User).where(User.email == body.email))
+    user = result.scalar_one_or_none()
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"No registered user found with email: {body.email}",
+        )
+
+    # Check if already an attendee
+    existing = await db.execute(
+        select(MeetingAttendee).where(
+            MeetingAttendee.meeting_id == meeting_id,
+            MeetingAttendee.user_id == user.id,
+        )
+    )
+    if existing.scalar_one_or_none():
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="User is already an attendee of this meeting",
+        )
+
+    attendee = MeetingAttendee(meeting_id=meeting_id, user_id=user.id)
+    db.add(attendee)
+    await db.flush()
+
+    return AddAttendeeResponse(
+        meeting_id=meeting_id,
+        user_id=user.id,
+        user_name=user.name,
+        user_email=user.email,
+    )
+
+
+# ------------------------------------------------------------------ #
+# Teams Live Join — bot attends the meeting (Day 1 endpoint, preserved)
 # ------------------------------------------------------------------ #
 @router.post(
     "/{meeting_id}/teams/join",
@@ -109,10 +246,6 @@ async def teams_join(
 ):
     """
     Send MeetMind's AI assistant to attend a live Teams meeting.
-
-    The bot joins the meeting, stays for the duration, and after the meeting
-    ends it automatically captures the transcript and generates a summary.
-
     Requires Azure AD credentials to be configured.
     """
     if not settings.azure_configured:
@@ -130,12 +263,10 @@ async def teams_join(
     meeting.source = "teams_live"
     meeting.status = "awaiting_join"
 
-    # Send the bot to join the meeting
     try:
         call_data = await teams_bot_service.schedule_join(
             str(meeting.id), body.teams_join_url
         )
-        # Store the Graph call ID for tracking
         meeting.external_meeting_id = call_data.get("id")
     except Exception as e:
         meeting.status = "failed"
@@ -151,7 +282,7 @@ async def teams_join(
 
 
 # ------------------------------------------------------------------ #
-# Meet Export Import — paste a transcript + auto-summarize
+# Meet Export Import (Day 1 endpoint, preserved)
 # ------------------------------------------------------------------ #
 @router.post(
     "/{meeting_id}/meet/import",
@@ -164,12 +295,7 @@ async def meet_import(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    """
-    Import a Google Meet exported transcript.
-
-    The transcript is stored and an AI summary is generated automatically.
-    No external dependency required — just paste the transcript text.
-    """
+    """Import a Google Meet exported transcript."""
     meeting = await _get_meeting_for_creator(meeting_id, db, current_user)
 
     ingestion = MeetIngestionService()
@@ -180,7 +306,7 @@ async def meet_import(
 
 
 # ------------------------------------------------------------------ #
-# Manual Transcript Upload — paste any transcript + auto-summarize
+# Manual Transcript Upload (Day 1 endpoint, preserved)
 # ------------------------------------------------------------------ #
 @router.post(
     "/{meeting_id}/transcript",
@@ -193,12 +319,7 @@ async def upload_transcript(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    """
-    Manually upload a transcript for any meeting (from any source).
-
-    The transcript is stored and an AI summary is generated automatically.
-    Use this for transcripts from any source — Zoom, Webex, in-person recordings, etc.
-    """
+    """Manually upload a transcript for any meeting (from any source)."""
     meeting = await _get_meeting_for_creator(meeting_id, db, current_user)
 
     meeting.raw_transcript = body.transcript_text
@@ -206,7 +327,6 @@ async def upload_transcript(
     meeting.status = "summarizing"
     await db.flush()
 
-    # Generate summary
     try:
         summary = await summary_service.generate_summary(
             body.transcript_text, meeting.title
@@ -223,7 +343,66 @@ async def upload_transcript(
 
 
 # ------------------------------------------------------------------ #
-# Re-summarize — regenerate summary for a meeting with a transcript
+# Process — trigger LangGraph ingestion pipeline (Phase 2 addition)
+# ------------------------------------------------------------------ #
+@router.post(
+    "/{meeting_id}/process",
+    response_model=MeetingResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+async def process_meeting(
+    meeting_id: UUID,
+    background_tasks: BackgroundTasks,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """
+    Trigger the LangGraph ingestion pipeline for a meeting.
+
+    Preconditions:
+    - Meeting must have status='processing' (or 'draft'/'ready' for reprocessing)
+    - raw_transcript must be non-empty
+
+    The pipeline:
+    1. Parses transcript into speaker turns
+    2. Generates global summary via Groq
+    3. Matches speakers to registered attendees
+    4. Extracts per-person action items, decisions, deadlines via Groq
+    5. Stores everything in Cognee with per-user isolation
+    6. Sets status='ready' (or 'failed')
+    """
+    meeting = await _get_meeting_for_attendee(meeting_id, db, current_user)
+
+    if not meeting.raw_transcript:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="No transcript available to process. Upload or import a transcript first.",
+        )
+
+    # Get all attendees
+    attendees = await _get_meeting_attendees(meeting_id, db)
+
+    # Set status to processing
+    meeting.status = "processing"
+    await db.flush()
+    await db.refresh(meeting)
+
+    # Run ingestion pipeline (inline, not background, for testability)
+    from app.services.ingestion_graph import run_ingestion_pipeline
+    await run_ingestion_pipeline(
+        meeting_id=str(meeting.id),
+        meeting_title=meeting.title,
+        raw_transcript=meeting.raw_transcript,
+        registered_attendees=attendees,
+        db=db,
+    )
+
+    await db.refresh(meeting)
+    return MeetingResponse.model_validate(meeting)
+
+
+# ------------------------------------------------------------------ #
+# Re-summarize (Day 1 endpoint, preserved)
 # ------------------------------------------------------------------ #
 @router.post(
     "/{meeting_id}/summarize",
@@ -234,17 +413,13 @@ async def summarize_meeting(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    """
-    (Re)generate the AI summary for a meeting that already has a transcript.
-
-    Use this to retry a failed summarization or regenerate with updated settings.
-    """
+    """(Re)generate the AI summary for a meeting with a transcript."""
     meeting = await _get_meeting_for_creator(meeting_id, db, current_user)
 
     if not meeting.raw_transcript:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="No transcript available to summarize. Upload a transcript first.",
+            detail="No transcript available to summarize.",
         )
 
     meeting.status = "summarizing"
@@ -273,7 +448,7 @@ async def summarize_meeting(
 
 
 # ------------------------------------------------------------------ #
-# Get just the summary
+# Get summary (Day 1 endpoint, preserved)
 # ------------------------------------------------------------------ #
 @router.get("/{meeting_id}/summary", response_model=MeetingSummaryResponse)
 async def get_summary(
@@ -282,7 +457,7 @@ async def get_summary(
     current_user: User = Depends(get_current_user),
 ):
     """Get the summary for a meeting."""
-    meeting = await _get_meeting_for_creator(meeting_id, db, current_user)
+    meeting = await _get_meeting_for_attendee(meeting_id, db, current_user)
 
     return MeetingSummaryResponse(
         id=meeting.id,

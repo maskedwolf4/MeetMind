@@ -4,7 +4,7 @@ from datetime import datetime
 from uuid import UUID
 from typing import Optional, List
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, EmailStr
 
 
 # ---------- Request schemas ----------
@@ -25,6 +25,11 @@ class MeetImportRequest(BaseModel):
 class ManualTranscriptRequest(BaseModel):
     """For manually uploading / pasting a transcript to any meeting."""
     transcript_text: str = Field(..., min_length=1)
+
+
+class AddAttendeeRequest(BaseModel):
+    """Add a user as a meeting attendee by email."""
+    email: EmailStr
 
 
 # ---------- Response schemas ----------
@@ -53,3 +58,11 @@ class MeetingSummaryResponse(BaseModel):
     transcript_length: int = 0
 
     model_config = {"from_attributes": True}
+
+
+class AddAttendeeResponse(BaseModel):
+    """Response after adding an attendee."""
+    meeting_id: UUID
+    user_id: UUID
+    user_name: str
+    user_email: str

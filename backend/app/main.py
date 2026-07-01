@@ -6,11 +6,14 @@ MeetMind is an AI meeting assistant that:
   2. Accepts exported Google Meet transcripts
   3. Accepts manually pasted transcripts from any source
   4. Generates AI-powered summaries from all transcripts
+  5. Runs a LangGraph ingestion pipeline for per-attendee personalized extracts
+  6. Stores everything in Cognee with per-user isolation
 
 On startup:
   1. Validates Azure AD prerequisites for Teams bot (degraded mode if missing).
   2. Validates Groq API key for summarization (fallback mode if missing).
-  3. Registers all routers (auth, meetings, bot webhook).
+  3. Configures Cognee for memory layer.
+  4. Registers all routers (auth, meetings, bot webhook).
 """
 
 import logging
@@ -22,6 +25,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.core.config import settings
 from app.routers import auth, meetings
 from app.services.teams_bot_service import teams_bot_service
+from app.services.cognee_service import configure_cognee
 from bots.teams_bot.bot_handler import router as bot_router
 
 # ------------------------------------------------------------------ #
@@ -41,7 +45,7 @@ logger = logging.getLogger("meetmind")
 async def lifespan(app: FastAPI):
     """Run startup tasks before the app starts serving requests."""
     logger.info("=" * 60)
-    logger.info("  MeetMind Backend — Starting Up")
+    logger.info("  MeetMind Backend — Starting Up (v0.3.0)")
     logger.info("=" * 60)
 
     # Azure prerequisite check
@@ -58,11 +62,16 @@ async def lifespan(app: FastAPI):
         logger.info("🧠 AI Summarization: ENABLED (Groq %s)", settings.GROQ_MODEL)
         app.state.groq_configured = True
     else:
-        logger.info("⚠️  AI Summarization: FALLBACK MODE (set GROQ_API_KEY for AI summaries)")
+        logger.info("⚠️  AI Summarization: FALLBACK MODE (set GROQ_API_KEY)")
         app.state.groq_configured = False
 
-    logger.info("📝 Meet transcript import: ENABLED (no external dependency)")
+    # Cognee memory layer
+    configure_cognee()
+    logger.info("🧩 Cognee memory layer: CONFIGURED")
+
+    logger.info("📝 Meet transcript import: ENABLED")
     logger.info("📋 Manual transcript upload: ENABLED")
+    logger.info("🔄 LangGraph ingestion pipeline: ENABLED")
     logger.info("=" * 60)
     logger.info("  MeetMind Backend — Ready")
     logger.info("=" * 60)
@@ -79,9 +88,9 @@ app = FastAPI(
     title="MeetMind API",
     description=(
         "AI Meeting Assistant — attends your meetings, captures transcripts, "
-        "and generates personalized summaries for each attendee."
+        "generates personalized summaries per attendee with per-user isolation."
     ),
-    version="0.2.0",
+    version="0.3.0",
     lifespan=lifespan,
 )
 
@@ -104,6 +113,7 @@ app.include_router(bot_router)
 async def health():
     return {
         "status": "ok",
+        "version": "0.3.0",
         "azure_configured": getattr(app.state, "azure_configured", False),
         "groq_configured": getattr(app.state, "groq_configured", False),
         "capabilities": {
@@ -111,5 +121,7 @@ async def health():
             "ai_summarization": getattr(app.state, "groq_configured", False),
             "meet_import": True,
             "manual_transcript": True,
+            "ingestion_pipeline": True,
+            "cognee_memory": True,
         },
     }
